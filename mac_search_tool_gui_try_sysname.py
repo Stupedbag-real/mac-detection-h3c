@@ -11,6 +11,7 @@ import re
 import io
 import logging
 import threading
+import random
 
 logging.basicConfig()
 logging.getLogger("paramiko").setLevel(logging.DEBUG)
@@ -134,8 +135,10 @@ class Application(tk.CTk):
         #self.browse_button.grid_propagate(False)
         self.browse_entry = CTkEntry(self, corner_radius=100)
         self.browse_entry.place(y = 200, x = 950)
+        #Search button
         self.search_button = tk.CTkButton(self, text="Search", width= 540, command=self.run)
         self.search_button.place(y = 350, x = 10)
+        #Save result block
         self.save_file_path_label = tk.CTkLabel(self, text="Path where save result:")
         self.save_file_path_label.place(y=250, x=660)
         self.save_file_path_button = tk.CTkButton(self, text="Browse", command=self.save_result)
@@ -143,6 +146,11 @@ class Application(tk.CTk):
         self.save_file_path_entry = tk.CTkEntry(self, corner_radius=100)
         self.save_file_path_entry.place(y=250, x=950)
         #self.search_button.grid_propagate(False)
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = tk.CTkProgressBar(self, variable=self.progress_var, width=1050, height=30)
+        self.progress_label = CTkLabel(self, text="", fg_color="#504c54", bg_color="#504c54")
+        self.progress_label.place(y=300, x=520)
+        self.progress_bar.place(y=300, x=30)
         # Quit button
         self.quit_button = tk.CTkButton(self, text="Quit", width= 540, command=self.quit)
         self.quit_button.place(y = 350, x = 555)
@@ -201,16 +209,19 @@ class Application(tk.CTk):
     # Create a button to start the search
     def search(self):
         time.sleep(5)
-        def convert_ports(port):
-            port = re.sub(r"GigabitEthernet", "GE", port_raw)
+        def convert_ports(port_raw):
+            port = re.sub(r"(GigabitEthernet|GE|Gi|gi)", "GE", port_raw, flags=re.IGNORECASE)
+            port_comware = re.sub(r"(GigabitEthernet|GE|Gi|gi)", "Gi", port_raw_comware, flags=re.IGNORECASE)
             print(f"You entered port:{port}")
-            return port
+            print(f"You entered Comware port: {port_comware}")
+            return port, port_comware
+
         def convert_mac_address(mac_address):
                 mac_address_st1 = mac_address.lower()
                 mac_address_unsub = re.sub(r"[:-]", "", mac_address_st1)
                 hex_digits = re.findall(r"[0-9a-fA-F]{2}", mac_address_unsub)
-                mac_address = "-".join([f"{hex_digits[i]}{hex_digits[i + 1]}" for i in range(0, len(hex_digits), 2)])
-                return mac_address
+                converted_mac = "-".join([f"{hex_digits[i]}{hex_digits[i + 1]}" for i in range(0, len(hex_digits), 2)])
+                return converted_mac
         while True:
             username = self.username_entry.get()
             if not username:
@@ -226,20 +237,26 @@ class Application(tk.CTk):
         # Prompt user for physical port and mac address to search for
         while True:
             port_raw = self.port_entry.get()
+            port_raw_comware = port_raw
             if not port_raw:
                 print("Please provide a physical port of device")
                 continue
             break
         port = convert_ports(port_raw)
+        port_comware = convert_ports(port_raw_comware)
         while True:
-
             if self.var.get() == 1:
                 mac_address_raw_un = self.mac_address_entry.get()
-                mac_address = convert_mac_address(mac_address_raw_un)
-                #print(f"Converted MAC address: {mac_address}")
-                break
+                converted_mac_addresses = []
+                try:
+                    converted_mac = convert_mac_address(mac_address_raw_un)
+                    converted_mac_addresses.append(converted_mac)
+                    break
+                except:
+                    print("Failed to convert MAC address")
+                    break
             else:
-                mac_address = None
+                #mac_address = None
                 mac_workbook = openpyxl.load_workbook(self.mac_file_path)
                 mac_worksheet = mac_workbook.active
 
@@ -275,26 +292,41 @@ class Application(tk.CTk):
             device_ip = row[0].value
             devices.append(device_ip)
 
+
         # Create SSH client object
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.load_system_host_keys(filename=None)
         #print(f"{mac_address}")
 
+        # Initialize progress bar
+        total_devices = len(devices)
+        current_device = 0
+
         # Loop through devices and search for MAC address on specified port
         start_time = time.time()
         results = []
         for device in devices:
             try:
+                current_device += 1
+                progress_percent = (current_device / total_devices) * 100
+                self.per = str(int(progress_percent))
+                self.progress_var.set(float(progress_percent) / 100)
+                self.progress_label.configure(text=self.per + '%' )
+                if int(self.per) > 43:
+                    self.progress_label.configure(fg_color="#1f6aa5", bg_color="#1f6aa5")
+                else:
+                    self.progress_label.configure(fg_color="#504c54", bg_color="#504c54")
+                self.update_idletasks()
                 ssh.connect(hostname=device, username=username, password=password, timeout=10)
                 print(f"Connected to {device}")
                 # Open a shell
                 shell = ssh.invoke_shell()
                 time.sleep(1)
                 commands = [
-                    f"display mac-address | i {port}",
-                    f"display interface {port} | i Description",
-                    f'display interface {port} | i "Current state"',
+                    f"display mac-address | i {port[0]}",
+                    f"display interface {port_comware[1]} | i Description",
+                    f'display interface {port_comware[1]} | i "Current state"',
                     f"display current-configuration | i sysname"
                 ]
                 # Send commands to the shell
@@ -309,10 +341,10 @@ class Application(tk.CTk):
                     time.sleep(1)
                 #print(f"{output}")
                 status_match = re.search(r'Current state:\s+(\S+)', output)
-                print(f"{status_match}")
+                #print(f"{status_match}")
                 if status_match:
                     port_status = status_match.group(1)
-                    if port_status in ["UP", "DOWN", "Administratively down"]:
+                    if port_status in ["UP", "DOWN", "Administratively"]:
                         if port_status in ["UP"]:
                             for converted_mac in converted_mac_addresses:
                                 if converted_mac in output:
@@ -320,30 +352,32 @@ class Application(tk.CTk):
                                     if match:
                                         sysname = match.group(1)
                                         print(
-                                            f"MAC address {converted_mac} found on device {sysname} ({device}) on port {port}")
+                                            f"MAC address {converted_mac} found on device {sysname} ({device}) on port {port[0]}")
                                         description = re.search(r'Description:\s+(\S+)', output)
                                     if description:
                                         description = description.group(1)
-                                        print(f"Port {port} description: {description}")
-                                    results.append((device, sysname, converted_mac, port, description, port_status))
+                                        print(f"Port {port[0]} description: {description}")
+                                    results.append((device, sysname, converted_mac, port[0], description, port_status))
                                     break  # No need to search other MAC addresses once a match is found
                                 else:
                                     print(f"Not found this mac-address")
                                     print(f"Go next\n⇩")
                         else:
-                            print(f"Port {port} is not UP. Skipping...")
+                            print(f"Port {port[0]} is {port_status}. Skipping...")
                             match = re.search(r'sysname\s+\S+\s+(\S+)', output)
                             if match:
                                 sysname = match.group(1)
-                                print(f"{sysname}")
+                                #print(f"{sysname}")
                                 description = re.search(r'Description:\s+(\S+)', output)
                             if description:
                                 description = description.group(1)
-                            results.append((device, sysname, converted_mac_addresses, port, description, port_status))
+                            results.append((device, sysname, converted_mac_addresses, port[0], description, port_status))
                     else:
                         print(f"Unknown port status '{port_status}'. Skipping...")
                 else:
-                    print("Port status not found in output. Skipping...")
+                    with open(f"{device}_output.txt", "w") as file:
+                        file.write(output)
+                    print(f"Port status not found in output for device {device}. Output written to file.")
 
             except Exception as e:
                 print(f"An error occurred while processing device {device}: {str(e)}")
@@ -358,6 +392,8 @@ class Application(tk.CTk):
             except Exception as e:
                 print(e)
         ssh.close()
+        self.progress_var.set(100.0)
+        self.update_idletasks()
         end_time = time.time()
         print(f"Search completed in {end_time - start_time:.2f} seconds")
         # Create an Excel workbook and add a worksheet
